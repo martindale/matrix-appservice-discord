@@ -208,7 +208,7 @@ export class MatrixRoomHandler {
         });
         const channel = await this.discord.GetChannelFromRoomId(roomId);
         await (channel as Discord.TextChannel).send(
-          "Someone on Matrix has turned on encryption in this room, so the service will not bridge any new messages",
+          "Someone has turned on encryption in this room, so the service will not bridge any new messages",
         );
         await sendPromise;
         await intent.leave(roomId);

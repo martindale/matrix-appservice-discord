@@ -80,7 +80,7 @@ export class Provisioner {
         this.pendingRequests.set(channelId, approveFn);
         setTimeout(() => approveFn(false, true), timeout);
 
-        await channel.send(`${requestor} on matrix would like to bridge this channel. Someone with permission` +
+        await channel.send(`${requestor} on Fabric would like to bridge this channel. Someone with permission` +
             " to manage webhooks please reply with !approve or !deny in the next 5 minutes");
         return await deferP;
 

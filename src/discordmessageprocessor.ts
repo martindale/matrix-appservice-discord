@@ -23,7 +23,7 @@ import { Util } from "./util";
 import { Log } from "./log";
 const log = new Log("DiscordMessageProcessor");
 
-const MATRIX_TO_LINK = "https://matrix.to/#/";
+const MATRIX_TO_LINK = "https://to.fabric.pub/#/";
 const MXC_INSERT_REGEX = /\x01(\w+)\x01([01])\x01([0-9]*)\x01/g;
 const NAME_MXC_INSERT_REGEX_GROUP = 1;
 const ANIMATED_MXC_INSERT_REGEX_GROUP = 2;

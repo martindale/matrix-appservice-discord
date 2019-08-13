@@ -23,7 +23,7 @@ import { Client as MatrixClient } from "matrix-js-sdk";
 
 const MIN_NAME_LENGTH = 2;
 const MAX_NAME_LENGTH = 32;
-const MATRIX_TO_LINK = "https://matrix.to/#/";
+const MATRIX_TO_LINK = "https://to.fabric.pub/#/";
 
 export interface IMatrixMessageProcessorParams {
     displayname?: string;

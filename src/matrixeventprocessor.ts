@@ -97,7 +97,7 @@ export class MatrixEventProcessor {
             }
         }
 
-        msg += " on Matrix.";
+        msg += " on RPG Chat.";
         return msg;
     }
 
@@ -306,7 +306,7 @@ export class MatrixEventProcessor {
         embed.setAuthor(
             displayName.substr(0, MAX_NAME_LENGTH),
             avatarUrl,
-            `https://matrix.to/#/${sender}`,
+            `https://to.fabric.pub/#/${sender}`,
         );
     }
 

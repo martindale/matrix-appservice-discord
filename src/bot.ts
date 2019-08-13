@@ -708,9 +708,9 @@ export class DiscordBot {
                 const isApproved = msg.content === "!approve";
                 const successfullyBridged = await this.provisioner.MarkApproved(chan, msg.member, isApproved);
                 if (successfullyBridged && isApproved) {
-                    await msg.channel.sendMessage("Thanks for your response! The matrix bridge has been approved");
+                    await msg.channel.sendMessage("Thanks for your response! The bridge has been approved");
                 } else if (successfullyBridged && !isApproved) {
-                    await msg.channel.sendMessage("Thanks for your response! The matrix bridge has been declined");
+                    await msg.channel.sendMessage("Thanks for your response! The bridge has been declined");
                 } else {
                     await msg.channel.sendMessage("Thanks for your response, however" +
                         "the time for responses has expired - sorry!");
@@ -848,7 +848,7 @@ export class DiscordBot {
                     await this.OnMessage(newMsg);
                     return;
                 }
-                link = `https://matrix.to/#/${matrixIds[1]}/${matrixIds[0]}`;
+                link = `https://to.fabric.pub/#/${matrixIds[1]}/${matrixIds[0]}`;
             }
         }
 
