@@ -1,5 +1,5 @@
 /*
-Copyright 2018 matrix-appservice-discord
+Copyright 2018, 2019 matrix-appservice-discord
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ export interface IMatrixEventContent {
     msgtype?: string;
     url?: string;
     displayname?: string;
+    avatar_url?: string;
     reason?: string;
     "m.relates_to"?: any; // tslint:disable-line no-any
 }
@@ -42,6 +43,7 @@ export interface IMatrixEvent {
     unsigned?: any; // tslint:disable-line no-any
     origin_server_ts?: number;
     users?: any; // tslint:disable-line no-any
+    users_default?: any; // tslint:disable-line no-any
     notifications?: any; // tslint:disable-line no-any
 }
 

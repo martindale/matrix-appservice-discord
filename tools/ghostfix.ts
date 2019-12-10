@@ -19,16 +19,11 @@ import * as yaml from "js-yaml";
 import * as fs from "fs";
 import * as args from "command-line-args";
 import * as usage from "command-line-usage";
-import * as Bluebird from "bluebird";
-import { ChannelSyncroniser } from "../src/channelsyncroniser";
 import { DiscordBridgeConfig } from "../src/config";
-import { DiscordBot } from "../src/bot";
-import { DiscordStore } from "../src/store";
-import { Provisioner } from "../src/provisioner";
-import { UserSyncroniser } from "../src/usersyncroniser";
 import { Log } from "../src/log";
 import { Util } from "../src/util";
-import { TextChannel } from "discord.js";
+import { DiscordBot } from "../src/bot";
+import { DiscordStore } from "../src/store";
 
 const log = new Log("GhostFix");
 
@@ -81,7 +76,8 @@ if (options.help) {
 const yamlConfig = yaml.safeLoad(fs.readFileSync("./discord-registration.yaml", "utf8"));
 const registration = AppServiceRegistration.fromObject(yamlConfig);
 const config = new DiscordBridgeConfig();
-config.ApplyConfig(yaml.safeLoad(fs.readFileSync(options.config, "utf8")) as DiscordBridgeConfig);
+config.applyConfig(yaml.safeLoad(fs.readFileSync(options.config, "utf8")) as DiscordBridgeConfig);
+config.applyEnvironmentOverrides(process.env);
 
 if (registration === null) {
     throw new Error("Failed to parse registration file");
@@ -93,9 +89,6 @@ const clientFactory = new ClientFactory({
     token: registration.as_token,
     url: config.bridge.homeserverUrl,
 });
-const provisioner = new Provisioner();
-const discordstore = new DiscordStore(config.database ? config.database.filename : "discord.db");
-const discordbot = new DiscordBot(config, discordstore, provisioner);
 
 const bridge = new Bridge({
     clientFactory,
@@ -114,18 +107,13 @@ const bridge = new Bridge({
     userStore: config.database.userStorePath,
 });
 
-provisioner.SetBridge(bridge);
-discordbot.setBridge(bridge);
-
 async function run() {
-    try {
-        await bridge.loadDatabases();
-    } catch (e) {
-        await discordstore.init();
-    }
-    const userSync = new UserSyncroniser(bridge, config, discordbot);
+    await bridge.loadDatabases();
+    const store = new DiscordStore(config.database);
+    await store.init(undefined, bridge.getRoomStore());
+    const discordbot = new DiscordBot(botUserId, config, bridge, store);
+    await discordbot.init();
     bridge._clientFactory = clientFactory;
-    await discordbot.ClientFactory.init();
     const client = await discordbot.ClientFactory.getClient();
 
     const promiseList: Promise<void>[] = [];
@@ -137,11 +125,11 @@ async function run() {
                     return;
                 }
                 promiseList.push((async () => {
-                    await Bluebird.delay(curDelay);
+                    await Util.DelayedPromise(curDelay);
                     let currentSchedule = JOIN_ROOM_SCHEDULE[0];
                     const doJoin = async () => {
                         await Util.DelayedPromise(currentSchedule);
-                        await userSync.OnUpdateGuildMember(member, true);
+                        await discordbot.UserSyncroniser.OnUpdateGuildMember(member, true, false);
                     };
                     const errorHandler = async (err) => {
                         log.error(`Error joining rooms for ${member.id}`);

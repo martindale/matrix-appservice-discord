@@ -1,5 +1,5 @@
 /*
-Copyright 2018 matrix-appservice-discord
+Copyright 2018, 2019 matrix-appservice-discord
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,17 +14,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+type SQLTYPES = number | boolean | string | null;
+
 export interface ISqlCommandParameters {
-    [paramKey: string]: number | boolean | string | Promise<number | boolean | string>;
+    [paramKey: string]: SQLTYPES | Promise<SQLTYPES>;
 }
 
 export interface ISqlRow {
-    [key: string]: number | boolean | string;
+    [key: string]: SQLTYPES;
 }
 
 export interface IDatabaseConnector {
     Open(): void;
-    Get(sql: string, parameters?: ISqlCommandParameters): Promise<ISqlRow>;
+    Get(sql: string, parameters?: ISqlCommandParameters): Promise<ISqlRow|null>;
     All(sql: string, parameters?: ISqlCommandParameters): Promise<ISqlRow[]>;
     Run(sql: string, parameters?: ISqlCommandParameters): Promise<void>;
     Close(): Promise<void>;

@@ -1,5 +1,5 @@
 /*
-Copyright 2017, 2018 matrix-appservice-discord
+Copyright 2017 - 2019 matrix-appservice-discord
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,17 +19,24 @@ import * as markdown from "discord-markdown";
 import { DiscordBot } from "./bot";
 import * as escapeHtml from "escape-html";
 import { Util } from "./util";
+import { Bridge } from "matrix-appservice-bridge";
 
 import { Log } from "./log";
 const log = new Log("DiscordMessageProcessor");
 
-const MATRIX_TO_LINK = "https://to.fabric.pub/#/";
-const MXC_INSERT_REGEX = /\x01(\w+)\x01([01])\x01([0-9]*)\x01/g;
+const MATRIX_TO_LINK = "https://matrix.to/#/";
+// somehow the regex works properly if it isn't global
+// as we replace the match fully anyways this shouldn't be an issue
+const MXC_INSERT_REGEX = /\x01emoji\x01(\w+)\x01([01])\x01([0-9]*)\x01/;
 const NAME_MXC_INSERT_REGEX_GROUP = 1;
 const ANIMATED_MXC_INSERT_REGEX_GROUP = 2;
 const ID_MXC_INSERT_REGEX_GROUP = 3;
 const EMOJI_SIZE = 32;
 const MAX_EDIT_MSG_LENGTH = 50;
+
+// same as above, no global flag here, too
+const CHANNEL_INSERT_REGEX = /\x01chan\x01([0-9]*)\x01/;
+const ID_CHANNEL_INSERT_REGEX = 1;
 
 export class DiscordMessageProcessorOpts {
     constructor(readonly domain: string, readonly bot?: DiscordBot) {
@@ -82,10 +89,12 @@ export class DiscordMessageProcessor {
         });
         content = this.InsertEmbeds(content, msg);
         content = await this.InsertMxcImages(content, msg);
+        content = await this.InsertChannelPills(content, msg);
 
         // parse postmark stuff
         contentPostmark = this.InsertEmbedsPostmark(contentPostmark, msg);
         contentPostmark = await this.InsertMxcImages(contentPostmark, msg, true);
+        contentPostmark = await this.InsertChannelPills(contentPostmark, msg, true);
 
         result.body = content;
         result.formattedBody = contentPostmark;
@@ -138,6 +147,26 @@ export class DiscordMessageProcessor {
                     escapeHTML: false,
                 });
             }
+            if (embed.fields) {
+                for (const field of embed.fields) {
+                    embedContent += `\n**${field.name}**\n`;
+                    embedContent += markdown.toHTML(field.value, {
+                        discordCallback: this.getDiscordParseCallbacks(msg),
+                        discordOnly: true,
+                        escapeHTML: false,
+                    });
+                }
+            }
+            if (embed.image) {
+                embedContent += "\nImage: " + embed.image.url;
+            }
+            if (embed.footer) {
+                embedContent += "\n" + markdown.toHTML(embed.footer.text, {
+                    discordCallback: this.getDiscordParseCallbacks(msg),
+                    discordOnly: true,
+                    escapeHTML: false,
+                });
+            }
             content += embedContent;
         }
         return content;
@@ -154,15 +183,36 @@ export class DiscordMessageProcessor {
             let embedContent = "<hr>"; // Horizontal rule. Two to make sure the content doesn't become a title.
             const embedTitle = embed.url ?
                 `<a href="${escapeHtml(embed.url)}">${escapeHtml(embed.title)}</a>`
-                : escapeHtml(embed.title);
+                : (embed.title ? escapeHtml(embed.title) : undefined);
             if (embedTitle) {
                 embedContent += `<h5>${embedTitle}</h5>`; // h5 is probably best.
             }
             if (embed.description) {
+                embedContent += "<p>";
                 embedContent += markdown.toHTML(embed.description, {
                     discordCallback: this.getDiscordParseCallbacksHTML(msg),
                     embed: true,
-                });
+                }) + "</p>";
+            }
+            if (embed.fields) {
+                for (const field of embed.fields) {
+                    embedContent += `<p><strong>${escapeHtml(field.name)}</strong><br>`;
+                    embedContent += markdown.toHTML(field.value, {
+                        discordCallback: this.getDiscordParseCallbacks(msg),
+                        embed: true,
+                    }) + "</p>";
+                }
+            }
+            if (embed.image) {
+                const imgUrl = escapeHtml(embed.image.url);
+                embedContent += `<p>Image: <a href="${imgUrl}">${imgUrl}</a></p>`;
+            }
+            if (embed.footer) {
+                embedContent += "<p>";
+                embedContent += markdown.toHTML(embed.footer.text, {
+                    discordCallback: this.getDiscordParseCallbacksHTML(msg),
+                    embed: true,
+                }) + "</p>";
             }
             content += embedContent;
         }
@@ -180,18 +230,11 @@ export class DiscordMessageProcessor {
         return `<a href="${MATRIX_TO_LINK}${escapeHtml(memberId)}">${escapeHtml(memberName)}</a>`;
     }
 
-    public InsertChannel(node: IDiscordNode, msg: Discord.Message, html: boolean = false): string {
-        const id = node.id;
-        const channel = msg.guild.channels.get(id);
-        if (!channel) {
-            return html ? `&lt;#${escapeHtml(id)}&gt;` : `<#${id}>`;
-        }
-        const channelStr = escapeHtml(channel ? "#" + channel.name : "#" + id);
-        if (!html) {
-            return channelStr;
-        }
-        const roomId = escapeHtml(`#_discord_${msg.guild.id}_${id}:${this.opts.domain}`);
-        return `<a href="${MATRIX_TO_LINK}${roomId}">${escapeHtml(channelStr)}</a>`;
+    public InsertChannel(node: IDiscordNode): string {
+        // unfortunately these callbacks are sync, so we flag our channel with some special stuff
+        // and later on grab the real channel pill async
+        const FLAG = "\x01";
+        return `${FLAG}chan${FLAG}${node.id}${FLAG}`;
     }
 
     public InsertRole(node: IDiscordNode, msg: Discord.Message, html: boolean = false): string {
@@ -211,8 +254,7 @@ export class DiscordMessageProcessor {
         // unfortunately these callbacks are sync, so we flag our url with some special stuff
         // and later on grab the real url async
         const FLAG = "\x01";
-        const name = escapeHtml(node.name);
-        return `${FLAG}${name}${FLAG}${node.animated ? 1 : 0}${FLAG}${node.id}${FLAG}`;
+        return `${FLAG}emoji${FLAG}${node.name}${FLAG}${node.animated ? 1 : 0}${FLAG}${node.id}${FLAG}`;
     }
 
     public InsertRoom(msg: Discord.Message, def: string): string {
@@ -226,10 +268,12 @@ export class DiscordMessageProcessor {
             const animated = results[ANIMATED_MXC_INSERT_REGEX_GROUP] === "1";
             const id = results[ID_MXC_INSERT_REGEX_GROUP];
             let replace = "";
+            const nameHtml = escapeHtml(name);
             try {
                 const mxcUrl = await this.opts.bot!.GetEmoji(name, animated, id);
                 if (html) {
-                    replace = `<img alt="${name}" title="${name}" height="${EMOJI_SIZE}" src="${mxcUrl}" />`;
+                    replace = `<img alt="${nameHtml}" title="${nameHtml}" ` +
+                        `height="${EMOJI_SIZE}" src="${mxcUrl}" />`;
                 } else {
                     replace = `:${name}:`;
                 }
@@ -238,14 +282,35 @@ export class DiscordMessageProcessor {
                     `Could not insert emoji ${id} for msg ${msg.id} in guild ${msg.guild.id}: ${ex}`,
                 );
                 if (html) {
-                    replace = `&lt;${animated ? "a" : ""}:${name}:${id}&gt;`;
+                    replace = `&lt;${animated ? "a" : ""}:${nameHtml}:${id}&gt;`;
                 } else {
                     replace = `<${animated ? "a" : ""}:${name}:${id}>`;
                 }
             }
-            content = content.replace(results[0],
-                replace);
+            content = content.replace(results[0], replace);
             results = MXC_INSERT_REGEX.exec(content);
+        }
+        return content;
+    }
+
+    public async InsertChannelPills(content: string, msg: Discord.Message, html: boolean = false): Promise<string> {
+        let results = CHANNEL_INSERT_REGEX.exec(content);
+        while (results !== null) {
+            const id = results[ID_CHANNEL_INSERT_REGEX];
+            let replace = "";
+            const channel = msg.guild.channels.get(id);
+            if (channel) {
+                const alias = await this.opts.bot!.ChannelSyncroniser.GetAliasFromChannel(channel);
+                if (alias) {
+                    const name = "#" + channel.name;
+                    replace = html ? `<a href="${MATRIX_TO_LINK}${escapeHtml(alias)}">${escapeHtml(name)}</a>` : name;
+                }
+            }
+            if (!replace) {
+                replace = html ? `&lt;#${escapeHtml(id)}&gt;` : `<#${id}>`;
+            }
+            content = content.replace(results[0], replace);
+            results = CHANNEL_INSERT_REGEX.exec(content);
         }
         return content;
     }
@@ -254,13 +319,17 @@ export class DiscordMessageProcessor {
         if (!embed.url) {
             return false;
         }
-        return msg.content.includes(embed.url);
+        let url = embed.url;
+        if (url.substr(url.length - 1) === "/") {
+            url = url.substr(0, url.length - 1);
+        }
+        return msg.content.includes(url);
     }
 
     private getDiscordParseCallbacks(msg: Discord.Message) {
         return {
-            channel: (node) => this.InsertChannel(node, msg),
-            emoji: (node) => this.InsertEmoji(node),
+            channel: (node) => this.InsertChannel(node), // are post-inserted
+            emoji: (node) => this.InsertEmoji(node), // are post-inserted
             everyone: (_) => this.InsertRoom(msg, "@everyone"),
             here: (_) => this.InsertRoom(msg, "@here"),
             role: (node) => this.InsertRole(node, msg),
@@ -270,7 +339,7 @@ export class DiscordMessageProcessor {
 
     private getDiscordParseCallbacksHTML(msg: Discord.Message) {
         return {
-            channel: (node) => this.InsertChannel(node, msg, true),
+            channel: (node) => this.InsertChannel(node), // are post-inserted
             emoji: (node) => this.InsertEmoji(node), // are post-inserted
             everyone: (_) => this.InsertRoom(msg, "@everyone"),
             here: (_) => this.InsertRoom(msg, "@here"),

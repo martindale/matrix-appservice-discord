@@ -1,5 +1,5 @@
 /*
-Copyright 2018 matrix-appservice-discord
+Copyright 2018, 2019 matrix-appservice-discord
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ limitations under the License.
 import * as pgPromise from "pg-promise";
 import { Log } from "../log";
 import { IDatabaseConnector, ISqlCommandParameters, ISqlRow } from "./connector";
-const log = new Log("SQLite3");
+const log = new Log("Postgres");
 
 const pgp: pgPromise.IMain = pgPromise({
     // Initialization Options
@@ -44,19 +44,26 @@ export class Postgres implements IDatabaseConnector {
         this.db = pgp(this.connectionString);
     }
 
-    public async Get(sql: string, parameters?: ISqlCommandParameters): Promise<ISqlRow> {
+    public async Get(sql: string, parameters?: ISqlCommandParameters): Promise<ISqlRow|null> {
         log.silly("Get:", sql);
         return this.db.oneOrNone(Postgres.ParameterizeSql(sql), parameters);
     }
 
     public async All(sql: string, parameters?: ISqlCommandParameters): Promise<ISqlRow[]> {
         log.silly("All:", sql);
-        return this.db.many(Postgres.ParameterizeSql(sql), parameters);
+        try {
+            return await this.db.many(Postgres.ParameterizeSql(sql), parameters);
+        } catch (ex) {
+            if (ex.code === pgPromise.errors.queryResultErrorCode.noData ) {
+                return [];
+            }
+            throw ex;
+        }
     }
 
     public async Run(sql: string, parameters?: ISqlCommandParameters): Promise<void> {
         log.silly("Run:", sql);
-        return this.db.oneOrNone(Postgres.ParameterizeSql(sql), parameters);
+        return this.db.oneOrNone(Postgres.ParameterizeSql(sql), parameters).then(() => {});
     }
 
     public async Close(): Promise<void> {

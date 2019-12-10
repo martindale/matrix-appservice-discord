@@ -9,12 +9,12 @@
     "object-literal-sort-keys": "off",
     "no-any": true,
     "arrow-return-shorthand": true,
-    "no-magic-numbers": true,
+    "no-magic-numbers": [true, -1, 0, 1, 1000],
     "prefer-for-of": true,
     "typedef": {
       "severity": "warning"
     },
-    "await-promise": [true, "Bluebird"],
+    "await-promise": [true],
     "curly": true,
     "no-empty": false,
     "no-invalid-this": true,

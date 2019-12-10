@@ -1,5 +1,5 @@
 /*
-Copyright 2018 matrix-appservice-discord
+Copyright 2018, 2019 matrix-appservice-discord
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,14 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { User, GuildMember, GuildChannel } from "discord.js";
+import { User, GuildMember } from "discord.js";
 import { DiscordBot } from "./bot";
 import { Util } from "./util";
-import { MatrixUser, RemoteUser, Bridge, Entry, UserBridgeStore, Intent } from "matrix-appservice-bridge";
+import { Bridge, Intent, MatrixUser } from "matrix-appservice-bridge";
 import { DiscordBridgeConfig } from "./config";
-import * as Bluebird from "bluebird";
 import { Log } from "./log";
 import { IMatrixEvent } from "./matrixtypes";
+import { DbUserStore, RemoteUser } from "./db/userstore";
 
 const log = new Log("UserSync");
 
@@ -81,12 +81,11 @@ export class UserSyncroniser {
 
     // roomId+userId => ev
     public userStateHold: Map<string, IMatrixEvent>;
-    private userStore: UserBridgeStore;
     constructor(
         private bridge: Bridge,
         private config: DiscordBridgeConfig,
-        private discord: DiscordBot) {
-        this.userStore = this.bridge.getUserStore();
+        private discord: DiscordBot,
+        private userStore: DbUserStore) {
         this.userStateHold = new Map<string, IMatrixEvent>();
     }
 
@@ -115,18 +114,19 @@ export class UserSyncroniser {
             log.info(`Creating new user ${userState.mxUserId}`);
             remoteUser = new RemoteUser(userState.id);
             await this.userStore.linkUsers(
-                new MatrixUser(userState.mxUserId.substr("@".length)),
-                remoteUser,
+                userState.mxUserId.substr("@".length),
+                userState.id,
             );
 
         } else {
-            remoteUser = await this.userStore.getRemoteUser(userState.id);
+            const rUser = await this.userStore.getRemoteUser(userState.id);
+            remoteUser = rUser ? rUser : new RemoteUser(userState.id);
         }
 
         if (userState.displayName !== null) {
             log.verbose(`Updating displayname for ${userState.mxUserId} to "${userState.displayName}"`);
             await intent.setDisplayName(userState.displayName);
-            remoteUser.set("displayname", userState.displayName);
+            remoteUser.displayname = userState.displayName;
             userUpdated = true;
         }
 
@@ -138,16 +138,16 @@ export class UserSyncroniser {
                 userState.avatarId,
             );
             await intent.setAvatarUrl(avatarMxc.mxcUrl);
-            remoteUser.set("avatarurl", userState.avatarUrl);
-            remoteUser.set("avatarurl_mxc", avatarMxc.mxcUrl);
+            remoteUser.avatarurl = userState.avatarUrl;
+            remoteUser.avatarurlMxc = avatarMxc.mxcUrl;
             userUpdated = true;
         }
 
         if (userState.removeAvatar) {
             log.verbose(`Clearing avatar_url for ${userState.mxUserId} to "${userState.avatarUrl}"`);
             await intent.setAvatarUrl(null);
-            remoteUser.set("avatarurl", null);
-            remoteUser.set("avatarurl_mxc", null);
+            remoteUser.avatarurl = null;
+            remoteUser.avatarurlMxc = null;
             userUpdated = true;
         }
 
@@ -198,11 +198,17 @@ export class UserSyncroniser {
             return;
         }
         const remoteUser = await this.userStore.getRemoteUser(memberState.id);
+        let avatar = "";
+        if (remoteUser) {
+            avatar = remoteUser.avatarurlMxc || "";
+        } else {
+            log.warn("Remote user wasn't found, using blank avatar");
+        }
         const intent = this.bridge.getIntent(memberState.mxUserId);
         /* The intent class tries to be smart and deny a state update for <PL50 users.
            Obviously a user can change their own state so we use the client instead. */
         await intent.getClient().sendStateEvent(roomId, "m.room.member", {
-            "avatar_url": remoteUser.get("avatarurl_mxc"),
+            "avatar_url": avatar,
             "displayname": memberState.displayName,
             "membership": "join",
             "uk.half-shot.discord.member": {
@@ -214,11 +220,12 @@ export class UserSyncroniser {
             },
         }, memberState.mxUserId);
 
-        if (guildId) {
-            const nickKey = `nick_${guildId}`;
-            remoteUser.set(nickKey, memberState.displayName);
+        if (remoteUser) {
+            if (guildId) {
+                remoteUser.guildNicks.set(guildId, memberState.displayName);
+            }
+            await this.userStore.setRemoteUser(remoteUser);
         }
-        await this.userStore.setRemoteUser(remoteUser);
     }
 
     public async GetUserUpdateState(discordUser: User, webhookID?: string): Promise<IUserState> {
@@ -232,7 +239,11 @@ export class UserSyncroniser {
             id: discordUser.id,
             mxUserId: `@_discord_${discordUser.id}${mxidExtra}:${this.config.bridge.domain}`,
         });
-        const displayName = this.displayNameForUser(discordUser);
+        const displayName = Util.ApplyPatternString(this.config.ghosts.usernamePattern, {
+            id: discordUser.id,
+            tag: discordUser.discriminator,
+            username: discordUser.username,
+        });
         // Determine if the user exists.
         const remoteId = discordUser.id + mxidExtra;
         const remoteUser = await this.userStore.getRemoteUser(remoteId);
@@ -245,13 +256,13 @@ export class UserSyncroniser {
             return userState;
         }
 
-        const oldDisplayName = remoteUser.get("displayname");
+        const oldDisplayName = remoteUser.displayname;
         if (oldDisplayName !== displayName) {
             log.verbose(`User ${discordUser.id} displayname should be updated`);
             userState.displayName = displayName;
         }
 
-        const oldAvatarUrl = remoteUser.get("avatarurl");
+        const oldAvatarUrl = remoteUser.avatarurl;
         if (oldAvatarUrl !== discordUser.avatarURL) {
             log.verbose(`User ${discordUser.id} avatarurl should be updated`);
             if (discordUser.avatarURL !== null) {
@@ -268,10 +279,16 @@ export class UserSyncroniser {
     public async GetUserStateForGuildMember(
         newMember: GuildMember,
     ): Promise<IGuildMemberState> {
+        const name = Util.ApplyPatternString(this.config.ghosts.nickPattern, {
+            id: newMember.user.id,
+            nick: newMember.displayName,
+            tag: newMember.user.discriminator,
+            username: newMember.user.username,
+        });
         const guildState: IGuildMemberState = Object.assign({}, DEFAULT_GUILD_STATE, {
             bot: newMember.user.bot,
             displayColor: newMember.displayColor,
-            displayName: newMember.displayName,
+            displayName: name,
             id: newMember.id,
             mxUserId: `@_discord_${newMember.id}:${this.config.bridge.domain}`,
             roles: newMember.roles.map((role) => { return {
@@ -306,13 +323,13 @@ export class UserSyncroniser {
 
     public async OnAddGuildMember(member: GuildMember) {
         log.info(`Joining ${member.id} to all rooms for guild ${member.guild.id}`);
-        await this.OnUpdateGuildMember(member, true);
+        await this.OnUpdateGuildMember(member, true, false);
     }
 
     public async OnRemoveGuildMember(member: GuildMember) {
         /* NOTE: This can be because of a kick, ban or the user just leaving. Discord doesn't tell us. */
         log.info(`Leaving ${member.id} to all rooms for guild ${member.guild.id}`);
-        const rooms = await this.discord.GetRoomIdsFromGuild(member.guild);
+        const rooms = await this.discord.GetRoomIdsFromGuild(member.guild, undefined, false);
         const intent = this.discord.GetIntentFromDiscordMember(member);
         return Promise.all(
             rooms.map(
@@ -321,16 +338,16 @@ export class UserSyncroniser {
         );
     }
 
-    public async OnUpdateGuildMember(member: GuildMember, doJoin: boolean = false) {
+    public async OnUpdateGuildMember(member: GuildMember, doJoin: boolean = false, useCache: boolean = true) {
         log.info(`Got update for ${member.id} (${member.user.username}).`);
         const state = await this.GetUserStateForGuildMember(member);
         let wantRooms: string[] = [];
         try {
-            wantRooms = await this.discord.GetRoomIdsFromGuild(member.guild, member);
+            wantRooms = await this.discord.GetRoomIdsFromGuild(member.guild, member, useCache);
         } catch (err) { } // no want rooms
         let allRooms: string[] = [];
         try {
-            allRooms = await this.discord.GetRoomIdsFromGuild(member.guild);
+            allRooms = await this.discord.GetRoomIdsFromGuild(member.guild, undefined, useCache);
         } catch (err) { } // no all rooms
 
         const leaveRooms: string[] = [];
@@ -344,10 +361,14 @@ export class UserSyncroniser {
         await Promise.all(
             wantRooms.map(
                 async (roomId) => {
-                    if (doJoin) {
-                        await this.JoinRoom(member, roomId);
-                    } else {
-                        await this.ApplyStateToRoom(state, roomId, member.guild.id);
+                    try {
+                        if (doJoin) {
+                            await this.JoinRoom(member, roomId);
+                        } else {
+                            await this.ApplyStateToRoom(state, roomId, member.guild.id);
+                        }
+                    } catch (err) {
+                        log.error(`Failed to update ${member.id} (${member.user.username}) in ${roomId}`, err);
                     }
                 },
             ),
@@ -366,79 +387,26 @@ export class UserSyncroniser {
     }
 
     public async UpdateStateForGuilds(remoteUser: RemoteUser) {
-        const id = remoteUser.getId();
+        const id = remoteUser.id;
         log.info(`Got update for ${id}.`);
 
         await Util.AsyncForEach(this.discord.GetGuilds(), async (guild) => {
             if (guild.members.has(id)) {
                 log.info(`Updating user ${id} in guild ${guild.id}.`);
                 const member = guild.members.get(id);
-                const state = await this.GetUserStateForGuildMember(member!);
-                const rooms = await this.discord.GetRoomIdsFromGuild(guild, member!);
-                await Promise.all(
-                    rooms.map(
-                        async (roomId) => this.ApplyStateToRoom(state, roomId, guild.id),
-                    ),
-                );
+                try {
+                    const state = await this.GetUserStateForGuildMember(member!);
+                    const rooms = await this.discord.GetRoomIdsFromGuild(guild, member!);
+                    await Promise.all(
+                        rooms.map(
+                            async (roomId) => this.ApplyStateToRoom(state, roomId, guild.id),
+                        ),
+                    );
+                } catch (err) {
+                    log.warn(`Failed to update user ${id} in guild ${guild.id}`, err);
+                }
             }
         });
-    }
-
-    public async OnMemberState(ev: IMatrixEvent, delayMs: number = 0): Promise<string> {
-        // Avoid tripping over multiple state events.
-        if (await this.memberStateLock(ev, delayMs) === false) {
-            // We're igorning this update because we have a newer one.
-            return UserSyncroniser.ERR_NEWER_EVENT;
-        }
-        log.verbose(`m.room.member was updated for ${ev.state_key}, checking if nickname needs updating.`);
-        const roomId = ev.room_id;
-        let discordId;
-        try {
-            const remoteUsers = await this.userStore.getRemoteUsersFromMatrixId(ev.state_key);
-            if (remoteUsers.length === 0) {
-                throw Error("User not found");
-            }
-            discordId = remoteUsers[0].getId();
-        } catch (e) {
-            log.warn(`Got member update for ${ev.state_key}, but no user is linked in the store`);
-            return UserSyncroniser.ERR_USER_NOT_FOUND;
-        }
-
-        // Fetch guild member by roomId;
-        let member;
-        try {
-            const channel = await this.discord.GetChannelFromRoomId(roomId) as GuildChannel;
-            member = await channel.guild.fetchMember(discordId);
-        } catch (e) {
-            log.warn(`Got member update for ${roomId}, but no channel or guild member could be found.`);
-            return UserSyncroniser.ERR_CHANNEL_MEMBER_NOT_FOUND;
-        }
-        const state = await this.GetUserStateForGuildMember(member);
-        await this.ApplyStateToRoom(state, roomId, member.guild.id);
-        return UserSyncroniser.ERR_NO_ERROR;
-    }
-
-    private async memberStateLock(ev: IMatrixEvent, delayMs: number = -1): Promise<boolean> {
-        const userStateKey = `${ev.room_id}${ev.state_key}`;
-        if (this.userStateHold.has(userStateKey)) {
-            const oldEv = this.userStateHold.get(userStateKey);
-            if (ev.origin_server_ts! > oldEv!.origin_server_ts!) {
-                return false; // New event is older
-            }
-        }
-        this.userStateHold.set(userStateKey, ev);
-        // tslint:disable-next-line:await-promise
-        await Bluebird.delay(delayMs);
-        if (this.userStateHold.get(userStateKey)!.event_id !== ev.event_id) {
-            // Event has changed and we are out of date.
-            return false;
-        }
-        this.userStateHold.delete(userStateKey);
-        return true;
-    }
-
-    private displayNameForUser(discordUser): string {
-        return `${discordUser.username}#${discordUser.discriminator}`;
     }
 
     private async leave(intent: Intent, roomId: string, checkCache: boolean = true) {

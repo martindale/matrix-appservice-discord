@@ -1,5 +1,5 @@
 /*
-Copyright 2018 matrix-appservice-discord
+Copyright 2018, 2019 matrix-appservice-discord
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,7 +23,8 @@ import { Client as MatrixClient } from "matrix-js-sdk";
 
 const MIN_NAME_LENGTH = 2;
 const MAX_NAME_LENGTH = 32;
-const MATRIX_TO_LINK = "https://to.fabric.pub/#/";
+const MATRIX_TO_LINK = "https://matrix.to/#/";
+const DEFAULT_ROOM_NOTIFY_POWER_LEVEL = 50;
 
 export interface IMatrixMessageProcessorParams {
     displayname?: string;
@@ -67,7 +68,7 @@ export class MatrixMessageProcessor {
                 params.displayname &&
                 params.displayname.length >= MIN_NAME_LENGTH &&
                 params.displayname.length <= MAX_NAME_LENGTH) {
-                reply = `_${params.displayname} ${reply}_`;
+                reply = `_${await this.escapeDiscord(params.displayname)} ${reply}_`;
             } else {
                 reply = `_${reply}_`;
             }
@@ -75,26 +76,31 @@ export class MatrixMessageProcessor {
         return reply;
     }
 
+    private async canNotifyRoom() {
+        if (!this.params || !this.params.mxClient || !this.params.roomId || !this.params.userId) {
+            return false;
+        }
+        return await Util.CheckMatrixPermission(
+            this.params.mxClient,
+            this.params.userId,
+            this.params.roomId,
+            DEFAULT_ROOM_NOTIFY_POWER_LEVEL,
+            "notifications",
+            "room",
+        );
+    }
+
     private async escapeDiscord(msg: string): Promise<string> {
         // \u200B is the zero-width space --> they still look the same but don't mention
         msg = msg.replace(/@everyone/g, "@\u200Beveryone");
         msg = msg.replace(/@here/g, "@\u200Bhere");
 
-        if (msg.includes("@room") && this.params && this.params.mxClient && this.params.roomId && this.params.userId) {
-            // let's check for more complex logic if @room should be replaced
-            const res: IMatrixEvent = await this.params.mxClient.getStateEvent(
-                this.params.roomId, "m.room.power_levels");
-            if (
-                res && res.users
-                && res.users[this.params.userId] !== undefined
-                && res.notifications
-                && res.notifications.room !== undefined
-                && res.users[this.params.userId] >= res.notifications.room
-            ) {
-                msg = msg.replace(/@room/g, "@here");
-            }
+        // Check the Matrix permissions to see if this user has the required
+        // power level to notify with @room; if so, replace it with @here.
+        if (msg.includes("@room") && await this.canNotifyRoom()) {
+            msg = msg.replace(/@room/g, "@here");
         }
-        const escapeChars = ["\\", "*", "_", "~", "`"];
+        const escapeChars = ["\\", "*", "_", "~", "`", "|"];
         msg = msg.split(" ").map((s) => {
             if (s.match(/^https?:\/\//)) {
                 return s;
@@ -139,11 +145,25 @@ export class MatrixMessageProcessor {
         return `<@${match[1]}>`;
     }
 
-    private parseChannel(id: string): string {
-        const CHANNEL_REGEX = /^#_discord_[0-9]*_([0-9]*)/;
+    private async parseChannel(id: string): Promise<string> {
+        const CHANNEL_REGEX = /^#_discord_[0-9]*_([0-9]*):/;
         const match = id.match(CHANNEL_REGEX);
         if (!match || !this.guild.channels.get(match[1])) {
-            return MATRIX_TO_LINK + id;
+            /*
+            This isn't formatted in #_discord_, so let's fetch the internal room ID
+            and see if it is still a bridged room!
+            */
+            if (this.params && this.params.mxClient) {
+                try {
+                    const resp = await this.params.mxClient.getRoomIdForAlias(id);
+                    if (resp && resp.room_id) {
+                        const roomId = resp.room_id;
+                        const channel = await this.bot.GetChannelFromRoomId(roomId);
+                        return `<#${channel.id}>`;
+                    }
+                } catch (err) { } // ignore, room ID wasn't found
+            }
+            return "";
         }
         return `<#${match[1]}>`;
     }
@@ -170,7 +190,7 @@ export class MatrixMessageProcessor {
                 reply = this.parseUser(id);
                 break;
             case "#":
-                reply = this.parseChannel(id);
+                reply = await this.parseChannel(id);
                 break;
         }
         if (!reply) {

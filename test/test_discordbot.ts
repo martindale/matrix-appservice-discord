@@ -1,5 +1,5 @@
 /*
-Copyright 2017, 2018 matrix-appservice-discord
+Copyright 2017 - 2019 matrix-appservice-discord
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import { DiscordBot } from "../src/bot";
 import { MockDiscordClient } from "./mocks/discordclient";
 import { MockMessage } from "./mocks/message";
 import { Util } from "../src/util";
+import { MockChannel } from "./mocks/channel";
 
 // we are a test file and thus need those
 /* tslint:disable:no-unused-expression max-file-line-count no-any */
@@ -66,6 +67,7 @@ const modDiscordBot = Proxyquire("../src/bot", {
     "./util": {
         Util: {
             AsyncForEach: Util.AsyncForEach,
+            DelayedPromise: Util.DelayedPromise,
             UploadContentFromUrl: async () => {
                 return {mxcUrl: "uploaded"};
             },
@@ -89,10 +91,11 @@ describe("DiscordBot", () => {
     describe("run()", () => {
         it("should resolve when ready.", async () => {
             discordBot = new modDiscordBot.DiscordBot(
+                "",
                 config,
-                null,
+                mockBridge,
+                {},
             );
-            discordBot.setBridge(mockBridge);
             await discordBot.run();
         });
     });
@@ -100,10 +103,11 @@ describe("DiscordBot", () => {
     describe("LookupRoom()", () => {
         beforeEach( async () => {
             discordBot = new modDiscordBot.DiscordBot(
+                "",
                 config,
-                null,
+                mockBridge,
+                {},
             );
-            discordBot.setBridge(mockBridge);
             await discordBot.run();
         });
         it("should reject a missing guild.", async () => {
@@ -130,28 +134,21 @@ describe("DiscordBot", () => {
     });
     describe("OnMessage()", () => {
         let SENT_MESSAGE = false;
-        let MARKED = -1;
         let HANDLE_COMMAND = false;
         let ATTACHMENT = {} as any;
         let MSGTYPE = "";
         function getDiscordBot() {
             SENT_MESSAGE = false;
-            MARKED = -1;
             HANDLE_COMMAND = false;
             ATTACHMENT = {};
             MSGTYPE = "";
             const discord = new modDiscordBot.DiscordBot(
+                "",
                 config,
                 mockBridge,
+                {},
             );
             discord.bot = { user: { id: "654" } };
-            discord.provisioner = {
-                HasPendingRequest: (chan) => true,
-                MarkApproved: async (chan, member, approved) => {
-                    MARKED = approved ? 1 : 0;
-                    return approved;
-                },
-            };
             discord.GetIntentFromDiscordMember = (_) => {return {
                 sendMessage: async (room, msg) => {
                     SENT_MESSAGE = true;
@@ -170,8 +167,8 @@ describe("DiscordBot", () => {
             discord.channelSync = {
                 GetRoomIdsFromChannel: async (chan) => ["!asdf:localhost"],
             };
-            discord.roomHandler = {
-                HandleDiscordCommand: async (msg) => { HANDLE_COMMAND = true; },
+            discord.discordCommandHandler = {
+                Process: async (msg) => { HANDLE_COMMAND = true; },
             };
             discord.store = {
                 Insert: async (_) => { },
@@ -189,22 +186,6 @@ describe("DiscordBot", () => {
             msg.content = "Hi!";
             await discordBot.OnMessage(msg);
             Chai.assert.equal(SENT_MESSAGE, false);
-        });
-        it("accepts !approve", async () => {
-            discordBot = getDiscordBot();
-            const channel = new Discord.TextChannel({} as any, {} as any);
-            const msg = new MockMessage(channel) as any;
-            msg.content = "!approve";
-            await discordBot.OnMessage(msg);
-            Chai.assert.equal(MARKED, 1);
-        });
-        it("denies !deny", async () => {
-            discordBot = getDiscordBot();
-            const channel = new Discord.TextChannel({} as any, {} as any);
-            const msg = new MockMessage(channel) as any;
-            msg.content = "!deny";
-            await discordBot.OnMessage(msg);
-            Chai.assert.equal(MARKED, 0);
         });
         it("Passes on !matrix commands", async () => {
             discordBot = getDiscordBot();
@@ -294,8 +275,10 @@ describe("DiscordBot", () => {
     describe("OnMessageUpdate()", () => {
         it("should return on an unchanged message", async () => {
             discordBot = new modDiscordBot.DiscordBot(
+                "",
                 config,
                 mockBridge,
+                {},
             );
 
             const guild: any = new MockGuild("123", []);
@@ -319,8 +302,10 @@ describe("DiscordBot", () => {
         });
         it("should send a matrix message on an edited discord message", async () => {
             discordBot = new modDiscordBot.DiscordBot(
+                "",
                 config,
                 mockBridge,
+                {},
             );
             discordBot.store.Get = (a, b) => null;
 
@@ -345,8 +330,10 @@ describe("DiscordBot", () => {
         });
         it("should delete and re-send if it is the newest message", async () => {
             discordBot = new modDiscordBot.DiscordBot(
+                "",
                 config,
                 mockBridge,
+                {},
             );
             discordBot.store.Get = (a, b) => { return {
                 MatrixId: "$event:localhost;!room:localhost",
@@ -380,8 +367,10 @@ describe("DiscordBot", () => {
     describe("event:message", () => {
         it("should delay messages so they arrive in order", async () => {
             discordBot = new modDiscordBot.DiscordBot(
+                "",
                 config,
                 mockBridge,
+                {},
             );
             let expected = 0;
             discordBot.OnMessage = async (msg: any) => {
@@ -389,20 +378,21 @@ describe("DiscordBot", () => {
                 expected++;
             };
             const client: MockDiscordClient = (await discordBot.ClientFactory.getClient()) as MockDiscordClient;
-            discordBot.setBridge(mockBridge);
             await discordBot.run();
             const ITERATIONS = 25;
             const CHANID = 123;
             // Send delay of 50ms, 2 seconds / 50ms - 5 for safety.
             for (let i = 0; i < ITERATIONS; i++) {
-              await client.emit("message", { n: i, channel: { id: CHANID} });
+                await client.emit("message", { channel: { guild: { id: CHANID }, id: CHANID} });
             }
             await discordBot.discordMessageQueue[CHANID];
         });
         it("should handle messages that reject in the queue", async () => {
             discordBot = new modDiscordBot.DiscordBot(
+                "",
                 config,
                 mockBridge,
+                {},
             );
             let expected = 0;
             const THROW_EVERY = 5;
@@ -415,16 +405,57 @@ describe("DiscordBot", () => {
                 return Promise.resolve();
             };
             const client: MockDiscordClient = (await discordBot.ClientFactory.getClient()) as MockDiscordClient;
-            discordBot.setBridge(mockBridge);
             await discordBot.run();
             const ITERATIONS = 25;
             const CHANID = 123;
             // Send delay of 50ms, 2 seconds / 50ms - 5 for safety.
             for (let n = 0; n < ITERATIONS; n++) {
-                await client.emit("message", { n, channel: { id: CHANID} });
+                await client.emit("message", { n, channel: { guild: { id: CHANID }, id: CHANID} });
             }
             await discordBot.discordMessageQueue[CHANID];
             assert.equal(expected, ITERATIONS);
+        });
+    });
+    describe("locks", () => {
+        it("should lock and unlock a channel", async () => {
+            const bot = new modDiscordBot.DiscordBot(
+                "",
+                config,
+                mockBridge,
+                {},
+            ) as DiscordBot;
+            const chan = new MockChannel("123") as any;
+            const t = Date.now();
+            bot.lockChannel(chan);
+            await bot.waitUnlock(chan);
+            const diff = Date.now() - t;
+            expect(diff).to.be.greaterThan(config.limits.discordSendDelay - 1);
+        });
+        it("should lock and unlock a channel early, if unlocked", async () => {
+            const discordSendDelay = 500;
+            const SHORTDELAY = 100;
+            const MINEXPECTEDDELAY = 95;
+            const bot = new modDiscordBot.DiscordBot(
+                "",
+                {
+                    bridge: {
+                        domain: "localhost",
+                    },
+                    limits: {
+                        discordSendDelay,
+                    },
+                },
+                mockBridge,
+                {},
+            ) as DiscordBot;
+            const chan = new MockChannel("123") as any;
+            setTimeout(() => bot.unlockChannel(chan), SHORTDELAY);
+            const t = Date.now();
+            bot.lockChannel(chan);
+            await bot.waitUnlock(chan);
+            const diff = Date.now() - t;
+            // Date accuracy can be off by a few ms sometimes.
+            expect(diff).to.be.greaterThan(MINEXPECTEDDELAY);
         });
     });
   // });
@@ -444,7 +475,6 @@ describe("DiscordBot", () => {
     //   const discordBot = new modDiscordBot.DiscordBot(
     //     config,
     //   );
-    //   discordBot.setBridge(mockBridge);
     //   discordBot.run();
     //   it("should reject an unknown room.", () => {
     //     return assert.isRejected(discordBot.OnTyping( {id: "512"}, {id: "12345"}, true));

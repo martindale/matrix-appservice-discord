@@ -1,5 +1,5 @@
 /*
-Copyright 2017, 2018 matrix-appservice-discord
+Copyright 2017 - 2019 matrix-appservice-discord
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,6 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+const ENV_PREFIX = "APPSERVICE_DISCORD";
+const ENV_KEY_SEPARATOR = "_";
+const ENV_VAL_SEPARATOR = ",";
+
 /** Type annotations for config/config.schema.yaml */
 export class DiscordBridgeConfig {
     public bridge: DiscordBridgeConfigBridge = new DiscordBridgeConfigBridge();
@@ -23,21 +27,52 @@ export class DiscordBridgeConfig {
     public room: DiscordBridgeConfigRoom = new DiscordBridgeConfigRoom();
     public channel: DiscordBridgeConfigChannel = new DiscordBridgeConfigChannel();
     public limits: DiscordBridgeConfigLimits = new DiscordBridgeConfigLimits();
+    public ghosts: DiscordBridgeConfigGhosts = new DiscordBridgeConfigGhosts();
 
     /**
      * Apply a set of keys and values over the default config.
-     * @param _config Config keys
+     * @param newConfig Config keys
      * @param configLayer Private parameter
      */
     // tslint:disable-next-line no-any
-    public ApplyConfig(newConfig: {[key: string]: any}, configLayer: any = this) {
+    public applyConfig(newConfig: {[key: string]: any}, configLayer: {[key: string]: any} = this) {
           Object.keys(newConfig).forEach((key) => {
-            if ( typeof(configLayer[key]) === "object" &&
-                    !Array.isArray(configLayer[key])) {
-                this.ApplyConfig(newConfig[key], this[key]);
-                return;
+            if (configLayer[key] instanceof Object && !(configLayer[key] instanceof Array)) {
+                this.applyConfig(newConfig[key], configLayer[key]);
+            } else {
+                configLayer[key] = newConfig[key];
             }
-            configLayer[key] = newConfig[key];
+        });
+    }
+
+    /**
+     * Override configuration keys defined in the supplied environment dictionary.
+     * @param environment environment variable dictionary
+     * @param path private parameter: config layer path determining the environment key prefix
+     * @param configLayer private parameter: current layer of configuration to alter recursively
+     */
+    public applyEnvironmentOverrides(
+        // tslint:disable-next-line no-any
+        environment: {[key: string]: any},
+        path: string[] = [ENV_PREFIX],
+        // tslint:disable-next-line no-any
+        configLayer: {[key: string]: any} = this,
+    ) {
+        Object.keys(configLayer).forEach((key) => {
+            // camelCase to THICK_SNAKE
+            const attributeKey = key.replace(/[A-Z]/g, (prefix) => `${ENV_KEY_SEPARATOR}${prefix}`).toUpperCase();
+            const attributePath = path.concat([attributeKey]);
+
+            if (configLayer[key] instanceof Object && !(configLayer[key] instanceof Array)) {
+                this.applyEnvironmentOverrides(environment, attributePath, configLayer[key]);
+            } else {
+                const lookupKey = attributePath.join(ENV_KEY_SEPARATOR);
+                if (lookupKey in environment) {
+                    configLayer[key] = (configLayer[key] instanceof Array)
+                        ? environment[lookupKey].split(ENV_VAL_SEPARATOR)
+                        : environment[lookupKey];
+                }
+            }
         });
     }
 }
@@ -54,6 +89,8 @@ class DiscordBridgeConfigBridge {
     public disableReadReceipts: boolean;
     public disableEveryoneMention: boolean = false;
     public disableHereMention: boolean = false;
+    public disableJoinLeaveNotifications: boolean = false;
+    public enableMetrics: boolean = false;
 }
 
 export class DiscordBridgeConfigDatabase {
@@ -84,7 +121,7 @@ class DiscordBridgeConfigChannel {
     public deleteOptions = new DiscordBridgeConfigChannelDeleteOptions();
 }
 
-class DiscordBridgeConfigChannelDeleteOptions {
+export class DiscordBridgeConfigChannelDeleteOptions {
     public namePrefix: string | null = null;
     public topicPrefix: string | null = null;
     public disableMessaging: boolean = false;
@@ -107,4 +144,9 @@ export class LoggingFile {
     public datePattern: string = "YYYY-MM-DD";
     public enabled: string[] = [];
     public disabled: string[] = [];
+}
+
+class DiscordBridgeConfigGhosts {
+    public nickPattern: string = ":nick";
+    public usernamePattern: string = ":username#:tag";
 }

@@ -14,38 +14,58 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import {
-    Bridge,
-    RemoteRoom,
-    MatrixRoom,
-} from "matrix-appservice-bridge";
 import * as Discord from "discord.js";
+import { DbRoomStore, RemoteStoreRoom, MatrixStoreRoom } from "./db/roomstore";
+import { ChannelSyncroniser } from "./channelsyncroniser";
+import { Log } from "./log";
 
 const PERMISSION_REQUEST_TIMEOUT = 300000; // 5 minutes
 
+const log = new Log("Provisioner");
+
 export class Provisioner {
 
-    private bridge: Bridge;
     private pendingRequests: Map<string, (approved: boolean) => void> = new Map(); // [channelId]: resolver fn
 
-    public SetBridge(bridge: Bridge): void {
-        this.bridge = bridge;
+    constructor(private roomStore: DbRoomStore, private channelSync: ChannelSyncroniser) { }
+
+    public async BridgeMatrixRoom(channel: Discord.TextChannel, roomId: string) {
+        const remote = new RemoteStoreRoom(`discord_${channel.guild.id}_${channel.id}_bridged`, {
+            discord_channel: channel.id,
+            discord_guild: channel.guild.id,
+            discord_type: "text",
+            plumbed: true,
+        });
+
+        const local = new MatrixStoreRoom(roomId);
+        return this.roomStore.linkRooms(local, remote);
     }
 
-    public BridgeMatrixRoom(channel: Discord.TextChannel, roomId: string) {
-        const remote = new RemoteRoom(`discord_${channel.guild.id}_${channel.id}_bridged`);
-        remote.set("discord_type", "text");
-        remote.set("discord_guild", channel.guild.id);
-        remote.set("discord_channel", channel.id);
-        remote.set("plumbed", true);
-
-        const local = new MatrixRoom(roomId);
-        this.bridge.getRoomStore().linkRooms(local, remote);
-        this.bridge.getRoomStore().setMatrixRoom(local); // Needs to be done after linking
-    }
-
-    public UnbridgeRoom(remoteRoom: RemoteRoom) {
-        return this.bridge.getRoomStore().removeEntriesByRemoteRoomId(remoteRoom.getId());
+    public async UnbridgeChannel(channel: Discord.TextChannel, rId?: string) {
+        const roomsRes = await this.roomStore.getEntriesByRemoteRoomData({
+            discord_channel: channel.id,
+            discord_guild: channel.guild.id,
+            plumbed: true,
+        });
+        if (roomsRes.length === 0) {
+            throw Error("Channel is not bridged");
+        }
+        const remoteRoom = roomsRes[0].remote as RemoteStoreRoom;
+        let roomsToUnbridge: string[] = [];
+        if (rId) {
+            roomsToUnbridge = [rId];
+        } else {
+            // Kill em all.
+            roomsToUnbridge = roomsRes.map((entry) => entry.matrix!.roomId);
+        }
+        await Promise.all(roomsToUnbridge.map( async (roomId) => {
+            try {
+                await this.channelSync.OnUnbridge(channel, roomId);
+            } catch (ex) {
+                log.error(`Failed to cleanly unbridge ${channel.id} ${channel.guild} from ${roomId}`, ex);
+            }
+        }));
+        await this.roomStore.removeEntriesByRemoteRoomId(remoteRoom.getId());
     }
 
     public async AskBridgePermission(

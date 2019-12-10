@@ -1,5 +1,5 @@
 /*
-Copyright 2017, 2018 matrix-appservice-discord
+Copyright 2017 - 2019 matrix-appservice-discord
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,13 +16,11 @@ limitations under the License.
 
 import { DiscordBridgeConfigAuth } from "./config";
 import { DiscordStore } from "./store";
-import { Client as DiscordClient } from "discord.js";
-import * as Bluebird from "bluebird";
+import { Client as DiscordClient, TextChannel } from "discord.js";
 import { Log } from "./log";
+import { MetricPeg } from "./metrics";
 
 const log = new Log("ClientFactory");
-
-const READY_TIMEOUT = 5000;
 
 export class DiscordClientFactory {
     private config: DiscordBridgeConfigAuth;
@@ -41,21 +39,19 @@ export class DiscordClientFactory {
         }
         // We just need to make sure we have a bearer token.
         // Create a new Bot client.
-        this.botClient = Bluebird.promisifyAll(new DiscordClient({
+        this.botClient = new DiscordClient({
             fetchAllMembers: true,
             messageCacheLifetime: 5,
             sync: true,
-        }));
+        });
 
-        return new Bluebird<void>((resolve, reject) => {
-            this.botClient.on("ready", () => {
-                resolve();
-            });
-            this.botClient.login(this.config.botToken).catch(reject);
-        }).timeout(READY_TIMEOUT).catch((err) => {
+        try {
+            await this.botClient.login(this.config.botToken);
+        } catch (err) {
             log.error("Could not login as the bot user. This is bad!", err);
             throw err;
-        });
+        }
+
     }
 
     public async getDiscordId(token: string): Promise<string> {
@@ -64,42 +60,44 @@ export class DiscordClientFactory {
             messageCacheLifetime: 5,
             sync: false,
         });
-        return new Bluebird<string>((resolve, reject) => {
-            client.on("ready", async () => {
-                const id = client.user.id;
-                await client.destroy();
-                resolve(id);
-            });
-            client.login(token).catch(reject);
-        }).timeout(READY_TIMEOUT).catch((err: Error) => {
-            log.warn("Could not login as a normal user.", err.message);
-            throw Error("Could not retrieve ID");
+
+        await client.login(token);
+        const id = client.user.id;
+
+        // This can be done asynchronously, because we don't need to block to return the id.
+        client.destroy().catch((err) => {
+            log.warn("Failed to destroy client ", id);
         });
+        return id;
     }
 
     public async getClient(userId: string | null = null): Promise<DiscordClient> {
         if (userId === null) {
             return this.botClient;
         }
+
         if (this.clients.has(userId)) {
             log.verbose("Returning cached user client for", userId);
             return this.clients.get(userId) as DiscordClient;
         }
-        const discordIds = await this.store.get_user_discord_ids(userId);
+
+        const discordIds = await this.store.getUserDiscordIds(userId);
         if (discordIds.length === 0) {
-            return Promise.resolve(this.botClient);
+            return this.botClient;
         }
         // TODO: Select a profile based on preference, not the first one.
-        const token = await this.store.get_token(discordIds[0]);
+        const token = await this.store.getToken(discordIds[0]);
         const client = new DiscordClient({
             fetchAllMembers: true,
             messageCacheLifetime: 5,
             sync: true,
         });
+
         const jsLog = new Log("discord.js-ppt");
         client.on("debug", (msg) => { jsLog.verbose(msg); });
         client.on("error", (msg) => { jsLog.error(msg); });
         client.on("warn", (msg) => { jsLog.warn(msg); });
+
         try {
             await client.login(token);
             log.verbose("Logged in. Storing ", userId);
@@ -109,5 +107,20 @@ export class DiscordClientFactory {
             log.warn(`Could not log ${userId} in. Returning bot user for now.`, err);
             return this.botClient;
         }
+    }
+
+    public bindMetricsToChannel(channel: TextChannel) {
+        // tslint:disable-next-line:no-any
+        const flexChan = channel as any;
+        if (flexChan._xmet_send !== undefined) {
+            return;
+        }
+        // Prefix the real functions with _xmet_
+        flexChan._xmet_send = channel.send;
+        // tslint:disable-next-line:only-arrow-functions
+        channel.send = function() {
+            MetricPeg.get.remoteCall("channel.send");
+            return flexChan._xmet_send.apply(channel, arguments);
+        };
     }
 }
